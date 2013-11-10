@@ -41,11 +41,13 @@ class DataExtractor:
         self.db = self.conn[MONGO_DB]
         self.petcoll = self.db[PETITIONS_COLL]
         self.petfullcoll = self.db[PETFULL_COLL]
+        self.probecoll = self.db[PROBE_COLL]
 
         pass
 
     def build_indexes(self):
         self.petcoll.ensure_index('slug', 1)
+        self.petcoll.ensure_index('url', 1)
         self.petcoll.ensure_index('topic', 1)
         self.petcoll.ensure_index('probe_date', 1)
         self.petcoll.ensure_index('votes', 1)
@@ -55,12 +57,18 @@ class DataExtractor:
         self.petfullcoll.ensure_index('probe_date', 1)
         self.petfullcoll.ensure_index('votes', 1)
 
+        self.probecoll.ensure_index('slug', 1)
+        self.probecoll.ensure_index('url', 1)
+        self.probecoll.ensure_index('probe_date', 1)
+        self.probecoll.ensure_index('votes', 1)
+
 
     def extract_petition(self, url, slug):
-        petition = self.petfullcoll.find_one({'slug' : slug})
+        petition = self.petcoll.find_one({'slug' : slug})
         if petition is not None:
-            print "Petition already processed %s" % slug
-            return
+            if petition['profile_type'] == 'full':
+                print "Petition already processed %s" % slug
+                return
         else:
             petition = {}
         u = urllib2.urlopen(url)
@@ -80,12 +88,20 @@ class DataExtractor:
         dateend = soup.find('div', attrs={'class' : 'inic-side-info block'}).find('div', attrs={'class' : 'date'}).string
         day, month, year = dateend.split('.')
         petition['end_date'] = datetime(int(year), int(month), int(day))
+        petition['profile_type'] = 'full'
         petition['start_date'] = datetime(int(year)-1, int(month), int(day))
 #        print url
 #        voting_tag = soup.find('div', attrs={'class' : 'voting-block voting-solution'}, recursive=True)
-        self.petfullcoll.update({'slug' : slug}, petition, upsert=True, safe=True)
+        self.petcoll.update({'slug' : slug}, petition, upsert=True, safe=True)
         print 'Petition updated: %s' %(slug)
         pass
+
+
+    def save_probe(self, p):
+        record = {}
+        for k in ['slug', 'url', 'probe_date', 'votes']:
+            record[k] = p[k]
+        self.probecoll.save(record)
 
     def extract_short_petitions_by_page(self, page=1, get_total=False):
         petitions = []
@@ -105,20 +121,29 @@ class DataExtractor:
             petition = self.petcoll.find_one({'slug' : slug})
             if not petition:
                 petition = {}
-            petition['votes'] = item.find('div', attrs={'class' : 'hour'}).find('b').string
-            petition['name'] = tag_alink.string
-            petition['url'] = urljoin(BASE_URL, last_url)
-            petition['slug'] = slug
-            petition['topic_id'] = topic
-            petition['jurisdiction'] = item.findAll('div')[-1]['class'].split()[-1]
-            petition['probe_date'] = datetime.now() #.isoformat()
-            petition['profile_type'] = 'short'
-            self.petcoll.update({'slug' : slug}, petition, upsert=True, safe=True)
-            print 'Petition updated: %s' %(slug)
+                petition['name'] = tag_alink.string
+                petition['url'] = urljoin(BASE_URL, last_url)
+                petition['slug'] = slug
+                petition['topic_id'] = topic
+                petition['jurisdiction'] = item.findAll('div')[-1]['class'].split()[-1]
+                petition['probe_date'] = datetime.now() #.isoformat()
+                petition['profile_type'] = 'short'
+                petition['votes'] = item.find('div', attrs={'class' : 'hour'}).find('b').string
+
+                print 'Petition saved: %s' %(slug)
+                self.petcoll.update({'slug' : slug}, petition, upsert=True, safe=True)
+                self.extract_petition(petition['url'], petition['slug'])
+                print 'Full petition stored: %s' %(slug)
+            else:
+                petition['votes'] = item.find('div', attrs={'class' : 'hour'}).find('b').string
+                petition['probe_date'] = datetime.now() #.isoformat()
+                print 'Petition updated: %s' %(slug)
+                self.petcoll.update({'slug' : slug}, petition, upsert=True, safe=True)
+            self.save_probe(petition)
         return petitions, total
 
 
-    def extract_short_petitions_all(self):
+    def extract_petitions_all(self):
         allpetitions = []
         petitions, total = self.extract_short_petitions_by_page(page=1, get_total=True)
         allpetitions.extend(petitions)
@@ -132,7 +157,7 @@ class DataExtractor:
 
 
     def extract_full_petitions_all(self):
-        nc = self.petcoll.find().count()
+        nc = self.petcoll.find({'profile_type' : 'short'}).count()
         i = 0
         for petition in self.petcoll.find():
             i += 1
@@ -159,12 +184,45 @@ class DataExtractor:
             self.petcoll.save(p, safe=True)
         self.petcoll.remove({'dateshare' : {"$exists" : False}}, safe=True)
 
+    def generate_first_probes(self):
+        if self.probecoll.count() > 0:
+            return
+        nc = self.petcoll.find().count()
+        i = 0
+        all = []
+        for p in self.petcoll.find():
+            all.append(p)
+
+        for p in all:
+            full = self.petcoll.find_one({'slug' : p['slug']})
+            record = {}
+            for k in ['slug', 'url', 'probe_date', 'votes']:
+                record[k] = p[k]
+            self.probecoll.save(record)
+
+    def fix_full(self):
+        nc = self.petcoll.find().count()
+        i = 0
+        all = []
+        for p in self.petcoll.find():
+            all.append(p)
+
+        for p in all:
+            if p['profile_type'] == 'short':
+                if p.has_key('autor_id'):
+                    p['profile_type'] = 'full'
+                    self.petcoll.save(p)
+                else:
+                    self.extract_petition(p['url'], p['slug'])
 
 if __name__ == "__main__":
     ext = DataExtractor()
-    ext.build_indexes()
+#    ext.build_indexes()
+#    ext.fix_full()
+#    ext.generate_first_probes()
+    ext.extract_petitions_all()
 #    ext.extract_short_petitions_all()
-    ext.extract_full_petitions_all()
-    ext.merge_petitions()
+#    ext.extract_full_petitions_all()
+#    ext.merge_petitions()
 
 
